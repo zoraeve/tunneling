@@ -10,6 +10,22 @@ using namespace std;
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
+#else
+#include <netinet/in.h>
+#include <unistd.h>
+#include <stdlib.h>  
+#include <stdio.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <string.h>
+#include <errno.h>
+#define SOCKET int
+#define INVALID_SOCKET  (SOCKET)(~0)
+typedef unsigned short      USHORT;
+#define SOCKET_ERROR            (-1)
 #endif
 
 const unsigned char ICMP_ECHO_REQUEST = 8;
@@ -86,7 +102,11 @@ bool decodeIcmpRsp(char* pBuf, int size, int oSeq)
 	else
 		return false;
 
+#if defined(_WIN32) || defined(_WIN64)
 	if (id != (unsigned short)GetCurrentProcessId() || ntohs(seq) != oSeq)
+#else
+	if (id != (unsigned short)getpid() || ntohs(seq) != oSeq)
+#endif	
 	{
 		return false;
 	}
@@ -95,15 +115,19 @@ bool decodeIcmpRsp(char* pBuf, int size, int oSeq)
 	{
 		return true;
 	}
+
+	return false;
 }
 
-//const char* szDst = "115.236.210.77";
+//const char* szDst = "115.236.50.10";
 const char* szDst = "www.sony.com";
 
 int main()
 {
+#if defined(_WIN32) || defined(_WIN64)
 	WSADATA w = {0};
 	WSAStartup(MAKEWORD(2, 2), &w);
+#endif
 
 	sockaddr_in dstSockAddr = {0};
 	dstSockAddr.sin_family = AF_INET;
@@ -117,15 +141,21 @@ int main()
 		}
 		else
 		{
+#if defined(_WIN32) || defined(_WIN64)
 			WSACleanup();
+#endif
 			return -1;
 		}
 	}
 
+	cout << inet_ntoa(dstSockAddr.sin_addr) << endl;
+
 	SOCKET s = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
 	if (INVALID_SOCKET == s)
 	{
+#if defined(_WIN32) || defined(_WIN64)
 		WSACleanup();
+#endif
 		return -1;
 	}
 
@@ -135,18 +165,41 @@ int main()
 	HEADER_ICMP* pIcmpHdr = (HEADER_ICMP*)szBuf;
 	pIcmpHdr->TYPE = ICMP_ECHO_REQUEST;
 	pIcmpHdr->CODE = 0;
+#if defined(_WIN32) || defined(_WIN64)
 	pIcmpHdr->ID = (USHORT)GetCurrentProcessId();
+#else
+	pIcmpHdr->ID = (unsigned short)getpid();
+#endif	
+	
 	memset((szBuf + sizeof(HEADER_ICMP)), 'E', DEFAULT_ICMP_DATA_SIZE - 1);
 
+
+#if defined(_WIN32) || defined(_WIN64)
 	int timeout = 30000;
 	if (SOCKET_ERROR == setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout)))
 	{
 		cout << WSAGetLastError() << endl;
+#else
+	struct timeval timeout={30,0};
+	if (SOCKET_ERROR == setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout)))
+	{
+		char szErrBuf[1024] = {0};
+		perror(szErrBuf);
+		cout << errno << szErrBuf << endl;
+#endif
 	}
 
+#if defined(_WIN32) || defined(_WIN64)
 	if (SOCKET_ERROR == setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout)))
 	{
 		cout << WSAGetLastError() << endl;
+#else
+	if (SOCKET_ERROR == setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout)))
+	{
+		char szErrBuf[1024] = {0};
+		perror(szErrBuf);
+		cout << errno << szErrBuf << endl;
+#endif
 	}
 
 	char szRcvBuf[1024] = {0};
@@ -154,11 +207,19 @@ int main()
 	int ttl = 1;
 	while(ttl <= 64)
 	{
+		cout << "Package: " << ttl << endl;
 		if (SOCKET_ERROR == setsockopt(s, IPPROTO_IP, IP_TTL, (char*)&ttl, sizeof(ttl)))
 		{
+#if defined(_WIN32) || defined(_WIN64)
 			cout << WSAGetLastError();
 			closesocket(s);
 			WSACleanup();
+#else
+			char szErrBuf[1024] = {0};
+			perror(szErrBuf);
+			cout << errno << szErrBuf << endl;
+			close(s);
+#endif
 			return -1;
 		}
 
@@ -169,8 +230,11 @@ int main()
 		sendto(s, szBuf, sizeof(szBuf), 0, (sockaddr*)&dstSockAddr, sizeof(dstSockAddr));
 
 		sockaddr_in from;
+#if defined(_WIN32) || defined(_WIN64)
 		int ifrom = sizeof(sockaddr_in);
-
+#else
+		socklen_t ifrom = sizeof(sockaddr_in);
+#endif
 		while(1)
 		{
 			int nlen = recvfrom(s, szRcvBuf, 1023, 0, (sockaddr*)&from, &ifrom);
@@ -181,8 +245,10 @@ int main()
 					cout << inet_ntoa(from.sin_addr) << endl;
 					if (dstSockAddr.sin_addr.s_addr == from.sin_addr.s_addr/*0 == strcmp(inet_ntoa(from.sin_addr), szDst)*/)
 					{
+#if defined(_WIN32) || defined(_WIN64)
 						WSACleanup();
 						system("pause");
+#endif
 						return 0;
 					}
 				}
@@ -192,19 +258,32 @@ int main()
 				}
 				break;
 			}
+#if defined(_WIN32) || defined(_WIN64)
 			else if (WSAETIMEDOUT == WSAGetLastError())
+#else
+			else if (ETIMEDOUT == errno)
+#endif
 			{
 				cout << "*" << endl;
 				break;
+			}
+			else
+			{
+#ifdef __linux__
+				char szErrBuf[1024] = {0};
+				perror(szErrBuf);
+				cout << errno << szErrBuf << endl;
+				break;
+#endif
 			}
 		}
 
 		++ttl;
 	}
 
-
+#if defined(_WIN32) || defined(_WIN64)
 	WSACleanup();
-
+#endif
 	system("pause");
 
 	return 0;
